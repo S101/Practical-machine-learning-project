@@ -1,0 +1,259 @@
+---
+title: "Practical Machine Learning - Project"
+author: "S101"
+date: "Thursday, August 06, 2015"
+output: html_document
+---
+```{r, echo=FALSE, results='hide', message=FALSE,warning=FALSE}
+# Load packages
+  setInternet2(TRUE)
+  options(repos=c(CRAN="http://ftp.heanet.ie/mirrors/cran.r-project.org/"))
+  install.packages(c('caret','doParallel','e1071','randomForest','gbm','glmnet','rpart','AppliedPredictiveModeling'))
+  install.packages(c('plyr','MASS','ggplot2'))
+  library(caret)
+  library(plyr)
+  library(MASS)
+  library(ggplot2)
+  library(doParallel)
+  library(e1071)
+  library(randomForest)
+  library(gbm)
+  library(glmnet)
+  library(rpart)
+  library(AppliedPredictiveModeling)
+
+# have r working in parallel over 2 cores
+  registerDoParallel(cores=3)
+
+# set work space
+  setwd('E:/data science specialisation/Practical machine learning')
+```
+
+# How well exercise is done?
+
+### Background
+Using data from accelerometer devices such as Jawbone Up, Nike FuelBand and Fitbit, on the belt, forearm, arm, and dumbbell, can we predict how well participants competed barbell lifts? Six participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. These, as described in the study, were "exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes." More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset) and refers to a published study by Velloso and authors (2013).  
+
+The intention is to model these observed results to be able to predict the class (classe variable) to future results where the true class specification is unknown.
+
+### Data
+The training data used is available from here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The formulated model prediction capability was validated on a separated data set of 20 records available from here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv  
+
+The training set was used as a training and testing set based on a 70:30 split to the data. This allowed the "testing" set provided to be used as blind validation of my model, and hopefully provide a better blind prediction. In the first instance data was downloaded to a local space and loaded into R replacing the following data strings with NA: DIV/0, "", NA. The first column of row number identifiers was also excluded. For lists and methods and libraries loaded for analysis please see the corresponding R markdown file.  
+
+The original training dataset consisted of 19622 records for 159 variables. Examining the data revealed a large number of columns with high NA occurrence, these variables were removed as they had no predictive capability. Bookkeeping variables were removed after initial screening as they would lead to overfiting of models to the training data. The initial screening looked at each variable by both classe and test subject. It was observed that there were a small number of extreme outlier data points, due to the low number the final model should be able to deal with these without prior removal. For the final dataset only the response variable "classe" and raw sensor variables were retained for modeling (those variables ending in x, y, and z).  
+
+Note it looks as though some test subjects had the sensors placed incorrectly resulting in reversed readings, for example Eurico who's forearm magnet in the z direction is the opposite of all other subjects.  
+
+```{r,echo=FALSE, warning=FALSE,message=FALSE}
+# download data files as training quite large file
+  training.url    <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+  test.cases.url  <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+  
+  training.file   <- 'pml-training.csv'
+  test.cases.file <- 'pml-testing.csv'
+  
+  download.file(training.url, training.file)
+  download.file(test.cases.url,test.cases.file )
+
+# load data
+  data<-read.csv(training.file,na.strings = c("#DIV/0!","","NA"), row.names = "X") # set error, blanks and "NA" to NA
+  Val<-read.csv(test.cases.file,na.strings = c("#DIV/0!","","NA"), row.names = 'X') # set error, blanks and "NA" to NA
+```
+
+```{r,echo=FALSE}
+## data clensing
+# desiding predictors out of the options avaliable
+  # str(data)
+
+# take out the new_window = yes - relate to summary statistics
+  data <- data[data$new_window=='no',]
+# remove variables with mostly na values - no use in modeling - removes the summary fields
+  mostlyNA <- sapply(data, function(x) mean(is.na(x))) > 0.95
+  #names(data)[mostlyNA==TRUE]
+  data<-data[,mostlyNA==FALSE]
+  #dim(data)
+```
+
+```{r, echo=FALSE,eval=FALSE} 
+# look at the distributions of each varaible - bar new_window which is a yes/no factor variable
+  for (i in 7:(dim(data)[2]-1)) {
+    #boxplot(training[,i]~training$classe, main = names(training)[i])
+    p<- ggplot(data, aes(x=classe, y=data[,i], fill=user_name)) + geom_boxplot() + ggtitle(names(data)[i])
+    print(p)
+  }
+#-- some of the variables look as though the measure is upside down! 
+#-- there are a couple of outliers within the data but hopefully the models should be able to cope with these without removal
+```
+
+```{r,echo=FALSE}
+# remove the first 6 columns which are metadata fields, would result in over fitting
+  data<-data[,-c(1:6)]
+# variables with near zero variance, may not be useful indicatiors and show little change
+  nzv <- nearZeroVar(data)
+  #names(data)[nzv]
+    # none
+
+##use only the oringinal raw _x, _y, and _z directional data and exclude those realating to pitch, roll, yaw, and total, this resutlts in  37 variables for the analysis.
+  vars_x<-names(data)[grep("_x", names(data))]
+  vars_y<-names(data)[grep("_y", names(data))]
+  vars_z<-names(data)[grep("_z", names(data))]
+  b<-c(vars_x,vars_y,vars_z)
+  data<-data[,c(b,"classe")]
+  #dim(data)
+```
+
+### Modeling
+The training data, as stated above was split according to 70:30 proportions to ensure enough data for training the model and a fair proportion to test it. For reproducibility the seed was set to 49393. Prior to modelling, the variable distributions were examined along with pair plots to examine any obvious trends. Formal checks for correlation between variables and between sequential data records was completed. Four variables showed highly correlation (over 90%) and therefore excluded from the model (namely: accel belt z, gyros forearm z, gyros dumbbell z, and gyros arm x). Thirty two predictor variables were therefore used in the model.  
+
+```{r}
+# split the trianing set into train and test
+  set.seed(49393)
+  inTrain = createDataPartition(data$classe, p = 0.7)[[1]]
+  training = data[ inTrain,]
+  testing = data[-inTrain,]
+```
+
+```{r, echo=FALSE,eval=FALSE}
+# data distribution within variables
+  for(i in names(training[,-37])){
+    hist(training[,i], main = i)
+  }
+
+## pair plot exploration... takes a while so better off saving them
+  ## catet scatter plot
+  myColors<- c("Red", "blue", "Green", "black", "Cyan") 
+  pch_vector <- c(0,6,12,18,1, 8, 19, 15, 17) 
+  my_settings <- list(superpose.symbol=list(alpha = rep(1, 9), col=myColors, cex=rep(0.3, 5), fill= myColors, font = rep(1, 5), pch=pch_vector)
+                     ,axis.text=list(alpha=0)
+                     ,add.text=list(cex=0.75)
+                     )
+  transparentTheme(trans = .4)
+  
+  total.vars<-names(training)[grep("total", names(training))]
+  temp<-training[,c("classe",total.vars)]
+  png("Variables_with_total.png", height = 15, width = 15, units='in', res = 1201) 
+  featurePlot(x = temp[,-1], y = temp$classe, plot = "pairs"
+              ,par.settings=my_settings
+              ## Add a key at the top
+              ,auto.key = list(columns = 5))
+  dev.off()
+
+  # arm
+  vars<-names(training)[grep("_arm", names(training))]
+  temp<-training[,c("classe",vars)]
+  png("Variables_with_arm.png", height = 15, width = 15, units='in', res = 1201) 
+  featurePlot(x = temp[,-1], y = temp$classe, plot = "pairs"
+              ,par.settings=my_settings
+              ## Add a key at the top
+              ,auto.key = list(columns = 5))
+  dev.off()
+
+  # forearm
+  vars<-names(training)[grep("forearm", names(training))]
+  temp<-training[,c("classe",vars)]
+  png("Variables_with_forearm.png", height = 15, width = 15, units='in', res = 1201) 
+  featurePlot(x = temp[,-1], y = temp$classe, plot = "pairs"
+              ,par.settings=my_settings
+              ## Add a key at the top
+              ,auto.key = list(columns = 5))
+  dev.off()
+
+  # dumbbell
+  vars<-names(training)[grep("dumbbell", names(training))]
+  temp<-training[,c("classe",vars)]
+  png("Variables_with_dumbbell.png",height = 15, width = 15, units='in', res = 1201) 
+  featurePlot(x = temp[,-1], y = temp$classe, plot = "pairs"
+              ,par.settings=my_settings
+              ## Add a key at the top
+              ,auto.key = list(columns = 5))
+  dev.off()
+
+  # belt
+  vars<-names(training)[grep("belt", names(training))]
+  temp<-training[,c("classe",vars)]
+  png("Variables_with_belt.png", height = 15, width = 15, units='in', res = 1201) 
+  featurePlot(x = temp[,-1], y = temp$classe, plot = "pairs"
+              ,par.settings=my_settings
+              ## Add a key at the top
+              ,auto.key = list(columns = 5))
+  dev.off()
+```
+
+```{r, echo=FALSE}
+# correlated variables?
+  trainingCor<-cor(training[,-37])
+  corednames<-findCorrelation(trainingCor, names = TRUE, cutoff=0.9)
+  #corednames
+  cored<-findCorrelation(trainingCor, cutoff=0.9)
+  #trainingCor[,cored]
+  training<-training[,-cored]
+  #dim(training)
+
+# correlated records?
+  #findLinearCombos(as.data.frame(training[,-37]))
+```
+
+A series of models were applied to the training data, each with 3 k-fold re-sampling cross validation using the "repeatedcv" method, multinomial Generalized linear model (glmnet), random forest classification (rf), tree classification (rpart), stochastic gradient boosting (gbm), and linear discriminant analysis (lda) to determine the best predictor method given by the out of sample error rate (the error rate achieved when tested against new un-modelled data). Predictions were therefore made for each of these models from the testing subset of the original training data. Below gives the prediction accuracy and the out of sample error for each model.
+
+```{r,echo=FALSE, results='hide', cache=TRUE, warning=FALSE, message=FALSE}
+# set a 3-fold Cross Validation to select optimal tuning parameters for each modelling method
+  controls <- trainControl(method="repeatedcv", number=3, verboseIter=F)
+  
+  # fit models
+  fitGLM<-train(classe~.,method= 'glmnet', family = 'multinomial', data =as.data.frame(droplevels(training)),trControl=controls)
+  fitRf<-train(classe~.,method='rf',data=as.data.frame(droplevels(training)), trControl=controls)
+  fitRpart<-train(classe~.,method='rpart',data=as.data.frame(droplevels(training)), trControl=controls)
+  fitGBM<-train(classe~.,method='gbm',data=as.data.frame(droplevels(training)), trControl=controls)
+  fitLDA<-train(classe~.,method='lda',data=as.data.frame(droplevels(training)), trControl=controls)
+```
+   
+```{r}
+# predict from the three model types
+  predGLM<-predict(fitGLM, testing)
+  predRf<-predict(fitRf, testing)
+  predRpart<-predict(fitRpart, testing)
+  predGBM<-predict(fitGBM, testing)
+  predLDA<-predict(fitLDA, testing)
+
+# confusion matrices for accuracy testing
+  cGLM <- confusionMatrix(predGLM, testing$classe)$overall[1] 
+  cRf <- confusionMatrix(predRf, testing$classe)$overall[1] 
+  cRpart <- confusionMatrix(predRpart, testing$classe)$overall[1] 
+  cGBM <- confusionMatrix(predGBM, testing$classe)$overall[1] 
+  cLDA <- confusionMatrix(predLDA, testing$classe)$overall[1] 
+
+  print(data.frame(tested_models = c('GLM','Random forest','Rpart','GBM','LDA')
+                  ,accuracy=c(round(cGLM,2),round(cRf,2),round(cRpart,2), round(cGBM,2), round(cLDA,2))
+                  ,error = c(round(1-cGLM,3),round(1-cRf,3),round(1-cRpart,3), round(1-cGBM,3), round(1-cLDA,3)))  
+       ,row.names=FALSE)
+```
+
+As you can see there is a degree of variability in the accuracy of predictions between the different models ranging from `r round(cRpart,2)` to `r round(cRf,2)`. The random forest gave the lowest out of sample error rate (1-accuracy) and therefore declared the best model to predict the exercise class of the validation data.
+
+### Validation Predictions 
+Based on the data in "pml-testing.csv"
+In this final step, we apply the random forest model fit from the training data to predict the exercise label classification for the 20 observations in the validation data set. These predictions are also written to individual files for separate submission:  
+
+```{r, echo=FALSE}
+  preds <- predict(fitRf, newdata=Val)
+  preds <- as.character(preds)
+  # write predictions to submission files
+  for(i in 1:length(preds)) {
+          filename <- paste0("problem_id_", i, ".txt")
+          write.table(preds[i], file=filename, quote=F, row.names=F, col.names=F)
+      }
+```
+
+### Conclusion
+the validation predictions were:
+```{r, echo=FALSE}
+  preds
+```
+Resulting in 20 out of 20 correct exercise label classifications. However, note the random forest accuracy is unusually high at `r round(cRf,2)` and is the result of a quirk in the data and strictly controlled method of data collection. 
+
+### References 
+Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., and Fuks, H. 2013. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI.
